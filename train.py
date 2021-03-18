@@ -9,25 +9,16 @@ pd.set_option('display.max_colwidth', None)
 # pandarallel.initialize()
 
 import spacy
+import json
 from spacy.training import Example
 import random
 
 import ahocorasick
 from copy import deepcopy
-import json
-import spacy
-import random
 
-def _build_aho(words):
-    aho = ahocorasick.Automaton()
-    for idx, key in enumerate(words):
-        
-        aho.add_word(key, (idx, key))
-
-    return aho
-
-def format_data(text, poi, street):
-    entities = []
+def format_each_data(text, poi, street, nlp):
+    entities_POI = []
+    entities_STREET = []
     _text = deepcopy(text)
     
     if isinstance(poi, str):
@@ -37,11 +28,9 @@ def format_data(text, poi, street):
         
         for end, (_, word) in aho.iter(_text):
             start = end - len(word) + 1
-            
             if start < latest_char_idx:
                 continue
-
-            entities.append([start, end + 1, 'POI'])
+            entities_POI.append((start, end + 1, 'POI'))
             _text = _text.replace(word, " " * len(word))
             latest_char_idx = end + 1
     if isinstance(street, str):
@@ -54,105 +43,86 @@ def format_data(text, poi, street):
             if start < latest_char_idx:
                 continue
 
-            entities.append([start, end + 1, 'STREET'])
+            entities_STREET.append((start, end + 1, 'STREET'))
             latest_char_idx = end + 1
+    street_example = None
+    poi_example = None
+    if len(entities_POI) > 0:
+        poi_example = Example.from_dict(nlp.make_doc(text), {"entities": entities_POI})
+    if len(entities_STREET) > 0:
+        street_example = Example.from_dict(nlp.make_doc(text), {"entities": entities_POI})
     
-    return text, entities
+    return poi_example, street_example
 
 
-def extract_entities(row):
-        extracted = row['POI/street'].split("/")
-        
-        if len(extracted) == 2:
-            poi, street = extracted
-            if poi.strip() != '':
-                row['POI'] = poi
+def train_model(train_data, num_iter, savename, nlp_model=None):
+    print("data size: ", len(train_data))
+    if nlp_model == None:
+        nlp = spacy.blank('id')
+        ner = nlp.create_pipe("ner")
+        nlp.add_pipe("ner")
+        ner.add_label("STREET")
+        ner.add_label("POI")
+    else:
+        nlp = nlp_model
+    optimizer = nlp.begin_training()
+    
+
+
+    for itn in range(40):
+        random.shuffle(train_data)
+        losses = {}
+        total_loss = 0
+        for batch in spacy.util.minibatch(train_data, size=2):
+            examples = []
+            for text, entities in batch:
+                doc = nlp.make_doc(text)                
+                examples.append(Example.from_dict(doc, entities))
+            nlp.update(examples, sgd=optimizer, losses=losses, drop=0.3)
+            total_loss += losses['ner']
+        print(itn, " : ", total_loss/len(train_data))
             
-            if street.strip() != '':
-                row['street'] = street
-            
-        return row
+
+    nlp.to_disk("./"+savename)
 
 
-if __name__ == "__main__":
+
+
+if __name__ == "__main__":  
+   
     
-    
-    
-    # df = pd.read_csv("./Address Elements Extraction Dataset/train.csv")
-    # df.set_index("id", inplace=True)
-    # df['POI'] = np.nan
-    # df['street'] = np.nan
-    # df = df.apply(extract_entities, axis=1)
-    # nlp = spacy.blank('id')  # create blank Language class
-    # print("Preparing Spacy examples...")
-
-    # examples = []
-    
-    # for idx in df.index:
-    #     try:
-    #         row = df.loc[idx]
-    #         text, entitie = format_data(row['raw_address'], row['POI'], row['street'])
-
-            
-    #         examples.append({"id": idx, "text": text, "entitie": entitie})
-    #     except Exception as e:
-    #         print(idx)
-    #         print("-" * 50)
-    #         print(e)
-    #         break
-
-    # with open('./entitie.json','w') as f:
-    #     # f.write(json.dumps(examples,  indent=2))
-    #     json.dump(examples, f, indent=2)
+    filter_df = pd.read_csv("./preprocess_data/filter_split.csv")
+    filter_ids = filter_df['id'].to_list()
 
 
-    TRAINING_DATA = []
-
-    with open("./entitie.json", "r") as read_file:
+    with open("./preprocess_data/entitie.json", "r") as read_file:
         objects = json.load(read_file)
-    
-        
+    TRAINING_DATA = []
     for data in objects:
         entities = []
-        # id = data["id"]
-        text = data["text"]
-        object_list  = data["entitie"]
+        idx = data["id"]
+        if idx in filter_ids:
+            text = data["text"]
+            object_list  = data["entitie"]
 
-        for label_object in object_list :
-            start_offset = label_object[0]
-            end_offset = label_object[1]
-            label = label_object[2]
-            entities.append((start_offset, end_offset, label))
-        
-        spacy_entry = (text, {"entities": entities})
-        TRAINING_DATA.append(spacy_entry)
+            for label_object in object_list :
+                start_offset = label_object[0]
+                end_offset = label_object[1]
+                label = label_object[2]
+                entities.append((start_offset, end_offset, label))
+            
+            spacy_entry = (text, {"entities": entities})
+            TRAINING_DATA.append(spacy_entry)
+    print(len(TRAINING_DATA))
+    print(TRAINING_DATA[0][1]['entities'])
 
 
-    spacy.prefer_gpu()
-    nlp = spacy.blank("en")
-    ner = nlp.create_pipe("ner")
-    nlp.add_pipe("ner")
-    ner.add_label("STREET")
-    ner.add_label("POI")
+    TRAINING_DATA = [d for d in TRAINING_DATA if len(d[1]['entities']) > 0 ]
+    # TRAINING_DATA = [d for d in TRAINING_DATA  for ]
+    print(len(TRAINING_DATA))
 
-    nlp.begin_training()
-    # Loop for 40 iterations
-    for itn in range(40):
-        random.shuffle(TRAINING_DATA)
-        losses = {}
-        examples = []
-        for batch in spacy.util.minibatch(TRAINING_DATA, size=2):
-            for text, entities in batch:
-                # texts = [text for text, entities in batch]
-                # annotations = [entities for text, entities in batch]
-                doc = nlp.make_doc(text)
-                # spacy.training.offsets_to_biluo_tags(doc, entities)
-                example = Example.from_dict(doc, entities)
-                examples.append(example)
-            nlp.update(examples, losses=losses, drop=0.3)
-            print(itn, " : ", losses)
-            example = []
-
-    nlp.to_disk("./address_model")
+    model_name = "./filter_model"
+    nlp_model = spacy.load(model_name)
+    train_model(TRAINING_DATA, 40, "filter_model_2", nlp_model)
 
 
